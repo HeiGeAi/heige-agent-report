@@ -39,6 +39,10 @@ def chain(payload, cfg):
 
 def main():
     payload = sys.argv[-1] if len(sys.argv) > 1 else "{}"
+    # 与 lark-coding-agent-bridge 共存：bridge 驱动的 codex 会话由 bridge 自己回卡片，
+    # 这里整体跳过（含转发），避免重复通知。
+    if os.environ.get("LARK_CHANNEL") or "lark-channel" in os.environ.get("LARKSUITE_CLI_CONFIG_DIR", ""):
+        return
     cfg = notify_lib.load_config()
 
     # 先转发给原有通知器，保证既有功能

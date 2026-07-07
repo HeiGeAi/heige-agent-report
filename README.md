@@ -12,7 +12,7 @@
 
 用引擎级钩子，而不是模型自觉：Claude Code 结束一轮、Codex 结束一轮，都由各自的原生机制强制触发，把结果摘要实时推到你的飞书。
 
-[这是什么](#这是什么-what-is-this) • [为什么可靠](#为什么可靠-why-its-reliable) • [工作原理](#工作原理-how-it-works) • [快速开始](#快速开始-quick-start) • [配置](#配置-configuration) • [卸载](#卸载-uninstall) • [致敬](#致敬-credits) • [English](#english)
+[这是什么](#这是什么-what-is-this) • [为什么可靠](#为什么可靠-why-its-reliable) • [工作原理](#工作原理-how-it-works) • [与 bridge 共存](#与-lark-coding-agent-bridge-共存-coexists-with-the-bridge) • [快速开始](#快速开始-quick-start) • [配置](#配置-configuration) • [卸载](#卸载-uninstall) • [致敬](#致敬-credits) • [English](#english)
 
 </div>
 
@@ -62,6 +62,15 @@ Codex
 - `claude_stop_hook.py`：读 Claude Code 的 transcript，算出本轮耗时、抽取最后的结果文本，过闸门后发送。
 - `codex_notify.py`：接 Codex 传来的 JSON，抽取 last-assistant-message 发送，并把原始事件转发给你原有的 notify 程序。
 - `notify_lib.py`：共享发送层，读 `~/.heige-agent-report/config.json`，通过 lark-cli 异步发一条 Markdown。
+
+## 与 lark-coding-agent-bridge 共存 Coexists with the bridge
+
+这个工具和 [Zara Zhang 的 lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge) 解决的是**两个正交的问题**，可以同时开着，互不打架：
+
+- **bridge**：你在飞书里给一个绑定的 agent 机器人**下指令、聊天**，它另起一个 headless 会话在你机器上跑。方向是**飞书 → agent**。
+- **heige-agent-report**：钩住你**本人正在用的** Claude Code 桌面端 / VSCode / CLI 会话，干完活通过 lark-cli 给你发通知。方向是 **agent → 你**。前者看不见你自己的会话，这块正好补上。
+
+两者一起用时，本工具会自动识别「这次会话是不是 bridge 驱动的」（认 `LARK_CHANNEL` 环境变量），如果是就**自动让路**，由 bridge 自己回卡片，绝不重复通知。
 
 ## 快速开始 Quick start
 

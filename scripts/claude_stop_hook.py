@@ -34,6 +34,10 @@ def main():
     # 防重入：Stop hook 触发的后续 Stop 不再推
     if hook.get("stop_hook_active"):
         return
+    # 与 lark-coding-agent-bridge 共存：若本会话由 bridge 驱动（它自己会回飞书卡片），
+    # 这里跳过，避免重复通知。两者可并存互不打架。
+    if os.environ.get("LARK_CHANNEL") or "lark-channel" in os.environ.get("CLAUDE_CONFIG_DIR", ""):
+        return
 
     cfg = notify_lib.load_config()
     threshold = float(os.environ.get("HEIGE_AGENT_REPORT_MIN_SECONDS",
