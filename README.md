@@ -41,7 +41,10 @@
 几个实测过的细节：
 
 - **不刷屏**：Claude Code 侧带耗时闸门，只有单轮真干了活（默认 ≥ 45 秒）才推，快速问答不打扰。
-- **不拖慢**：发送全程异步（脱离进程组的 fire-and-forget），钩子 0.07 秒返回，你的 agent 一点不卡。
+- **不拖慢**：钩子只写个临时文件、拉起一个脱离进程组的发送 worker 就返回，0.07 秒，你的 agent 一点不卡。
+- **不丢消息**：worker 带退避重试（默认 3 次，2s/5s/12s），一次网络抖动不会让通知永久丢失。
+- **可排查**：每次发送结果记到 `~/.heige-agent-report/report.log`（`sent ok` / 失败原因），漏发有据可查，日志超 512KB 自动截断。
+- **一键自检**：`python3 ~/.heige-agent-report/doctor.py` 检查配置 + 接线，并真发一条测试消息，装完立刻确认链路通。
 - **不抢占**：Codex 若已挂了别的 `notify`（比如电脑操作通知器），安装时自动把它捕获成转发目标，原功能照常。
 - **不添乱**：任何异常静默、退出 0，通知发失败也绝不影响 agent 本体。
 
@@ -113,8 +116,24 @@ bash install.sh --agents claude          # 只装 Claude Code
 | `lark_cli` | lark-cli 可执行路径 | `lark-cli` |
 | `min_seconds` | Claude Code 单轮耗时闸门（秒），`0` = 每轮都推 | `45` |
 | `codex_chain` | Codex 原有 notify 程序，安装时自动捕获 | `[]` |
+| `max_retries` | 送信失败最多重试次数（退避 2s/5s/12s） | `3` |
+| `log` | 是否记 `report.log`，`false` 关闭 | `true` |
 
 也可用环境变量临时覆盖闸门：`HEIGE_AGENT_REPORT_MIN_SECONDS=0`。
+
+## 排查 Troubleshooting
+
+没收到通知时，先跑自检（会真发一条测试消息）：
+
+```bash
+python3 ~/.heige-agent-report/doctor.py
+```
+
+再看发送日志，每次尝试的结果都在里面：
+
+```bash
+tail ~/.heige-agent-report/report.log
+```
 
 ## 卸载 Uninstall
 

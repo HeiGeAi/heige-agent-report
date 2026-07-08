@@ -27,7 +27,7 @@ def check(name, cond):
 def main():
     # 1) 语法编译
     for fn in ("notify_lib.py", "claude_stop_hook.py", "codex_notify.py",
-               "wire.py", "selftest.py"):
+               "wire.py", "doctor.py", "selftest.py"):
         p = os.path.join(HERE, fn)
         try:
             py_compile.compile(p, doraise=True)
@@ -82,6 +82,22 @@ def main():
         cmds3 = [h["hooks"][0]["command"] for h in d3.get("hooks", {}).get("Stop", [])]
         check("claude: 卸载后只剩旧 hook", cmds3 == ["echo keep"])
         check("codex: 卸载后还原原 notify", 'notify = ["/old/n", "arg"]' in open(codex).read())
+
+    # 3) 送信 worker 优雅失败：lark-cli 不可用时应重试→记日志→退出 0，绝不崩
+    with tempfile.TemporaryDirectory() as sb:
+        cfgp = os.path.join(sb, "config.json")
+        logp = os.path.join(sb, "report.log")
+        json.dump({"open_id": "ou_test", "lark_cli": "/bin/false",
+                   "max_retries": 1, "log_path": logp}, open(cfgp, "w"))
+        mdp = os.path.join(sb, "msg.md")
+        open(mdp, "w").write("test")
+        env = dict(os.environ, HEIGE_AGENT_REPORT_CONFIG=cfgp)
+        r = subprocess.run([PY, os.path.join(HERE, "notify_lib.py"), "--send", mdp],
+                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        check("worker: 失败也退出 0", r.returncode == 0)
+        check("worker: 临时 md 已清理", not os.path.exists(mdp))
+        logged = os.path.exists(logp) and "give up" in open(logp).read()
+        check("worker: 失败已记入日志", logged)
 
     print()
     if FAILS:

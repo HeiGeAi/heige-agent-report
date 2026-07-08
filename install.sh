@@ -69,7 +69,8 @@ fi
 # 3) 拷贝脚本
 mkdir -p "$INSTALL_DIR"
 cp "$REPO_ROOT/scripts/notify_lib.py" "$REPO_ROOT/scripts/claude_stop_hook.py" \
-   "$REPO_ROOT/scripts/codex_notify.py" "$REPO_ROOT/scripts/wire.py" "$INSTALL_DIR/"
+   "$REPO_ROOT/scripts/codex_notify.py" "$REPO_ROOT/scripts/wire.py" \
+   "$REPO_ROOT/scripts/doctor.py" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/"*.py
 
 # 4) 写配置（保留已有 codex_chain）
@@ -106,6 +107,9 @@ fi
 echo
 echo "✅ 安装完成。接收人 open_id: $OPEN_ID"
 for w in "${WIRED[@]}"; do echo "  - $w"; done
+echo
+echo "🩺 跑 doctor 自检 + 发一条测试消息："
+"$PYTHON_BIN" "$INSTALL_DIR/doctor.py" --claude-config "$CLAUDE_DIR" --codex-config "$CODEX_CONFIG" || true
 echo
 echo "下一步："
 echo "  1) 新开一个 Claude Code 会话（hook 在会话启动时加载；首次可能需确认 hook 变更）。"
