@@ -179,3 +179,7 @@ See [Quick start](#快速开始-quick-start) and [Configuration](#配置-configu
 MIT © 2026 HeiGeAi (Blake Xu)。详见 [LICENSE](LICENSE)。随便用、随便改、随便分享。
 
 Built on and grateful to codex-lark-deliver, lark-coding-agent-bridge, and the official Lark CLI. See [Credits](#致敬-credits).
+
+## 更多开源工具
+
+本项目属于黑哥 AI 的开源武器库。全部开源项目的清单、用途和协议,见 [heigeai.com/opensource](https://www.heigeai.com/opensource/)。
