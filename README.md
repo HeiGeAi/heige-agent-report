@@ -40,7 +40,8 @@
 
 几个实测过的细节：
 
-- **不刷屏**：Claude Code 侧带耗时闸门，只有单轮真干了活（默认 ≥ 45 秒）才推，快速问答不打扰。
+- **不刷屏（Claude Code）**：带耗时闸门，只有单轮真干了活（默认 ≥ 45 秒）才推，快速问答不打扰。
+- **不刷屏（Codex）**：新版 Codex 桌面端会把一个任务切成多个小 turn、每个都触发一次 notify（实测最密 6 秒一条）。本工具做 debounce 聚合：静默 120 秒无新事件才发最后一条，一个任务只给一个总反馈。
 - **不拖慢**：钩子只写个临时文件、拉起一个脱离进程组的发送 worker 就返回，0.07 秒，你的 agent 一点不卡。
 - **不丢消息**：worker 带退避重试（默认 3 次，2s/5s/12s），一次网络抖动不会让通知永久丢失。
 - **可排查**：每次发送结果记到 `~/.heige-agent-report/report.log`（`sent ok` / 失败原因），漏发有据可查，日志超 512KB 自动截断。
@@ -117,6 +118,7 @@ bash install.sh --agents claude          # 只装 Claude Code
 | `min_seconds` | Claude Code 单轮耗时闸门（秒），`0` = 每轮都推 | `45` |
 | `codex_chain` | Codex 原有 notify 程序，安装时自动捕获 | `[]` |
 | `max_retries` | 送信失败最多重试次数（退避 2s/5s/12s） | `3` |
+| `quiet_seconds` | Codex 聚合静默窗口（秒），窗口内多个 turn 合并成一条 | `120` |
 | `log` | 是否记 `report.log`，`false` 关闭 | `true` |
 
 也可用环境变量临时覆盖闸门：`HEIGE_AGENT_REPORT_MIN_SECONDS=0`。

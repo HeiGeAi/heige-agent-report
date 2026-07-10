@@ -11,6 +11,7 @@ import sys
 import json
 import tempfile
 import subprocess
+import time
 import py_compile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -98,6 +99,35 @@ def main():
         check("worker: 临时 md 已清理", not os.path.exists(mdp))
         logged = os.path.exists(logp) and "give up" in open(logp).read()
         check("worker: 失败已记入日志", logged)
+
+    # 4) codex debounce 聚合：3 个密集 turn 事件 → 只发送 1 次
+    with tempfile.TemporaryDirectory() as sb:
+        cfgp = os.path.join(sb, "config.json")
+        logp = os.path.join(sb, "report.log")
+        json.dump({"open_id": "ou_test", "lark_cli": "/bin/false",
+                   "max_retries": 1, "log_path": logp,
+                   "quiet_seconds": 2}, open(cfgp, "w"))
+        env = dict(os.environ, HEIGE_AGENT_REPORT_CONFIG=cfgp,
+                   HEIGE_AGENT_REPORT_HOME=sb,
+                   HEIGE_AGENT_REPORT_QUIET_SECONDS="2")
+        env.pop("LARK_CHANNEL", None)
+        script = os.path.join(HERE, "codex_notify.py")
+        for i in range(3):
+            subprocess.run([PY, script, json.dumps(
+                {"type": "agent-turn-complete",
+                 "last-assistant-message": f"turn {i}"})],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pending = os.path.join(sb, ".codex_pending.json")
+        check("codex: 事件已入队", os.path.exists(pending))
+        # 等待静默窗口 + 发送重试(1次)完成
+        deadline = time.time() + 12
+        while time.time() < deadline and os.path.exists(pending):
+            time.sleep(0.5)
+        check("codex: pending 已被 flush", not os.path.exists(pending))
+        time.sleep(2)  # 等 worker 写完日志
+        logtxt = open(logp).read() if os.path.exists(logp) else ""
+        check("codex: 聚合为一次发送", logtxt.count("give up") == 1)
+        check("codex: 聚合计数正确", "for 3 turn event(s)" in logtxt)
 
     print()
     if FAILS:
