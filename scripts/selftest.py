@@ -84,7 +84,25 @@ def main():
         check("claude: 卸载后只剩旧 hook", cmds3 == ["echo keep"])
         check("codex: 卸载后还原原 notify", 'notify = ["/old/n", "arg"]' in open(codex).read())
 
-    # 3) 送信 worker 优雅失败：lark-cli 不可用时应重试→记日志→退出 0，绝不崩
+    # 3) 完整安装器在隔离 HOME 中能正常返回成功
+    with tempfile.TemporaryDirectory() as sb:
+        fake_lark = os.path.join(sb, "lark-cli")
+        open(fake_lark, "w").write("#!/usr/bin/env sh\nprintf '%s\\n' '{\"message_id\":\"om_test\"}'\n")
+        os.chmod(fake_lark, 0o755)
+        codex_dir = os.path.join(sb, ".codex")
+        os.makedirs(codex_dir)
+        codex = os.path.join(codex_dir, "config.toml")
+        open(codex, "w").write('model = "audit"\n')
+        env = dict(os.environ, HOME=sb,
+                   HEIGE_AGENT_REPORT_HOME=os.path.join(sb, "install"))
+        result = subprocess.run(
+            ["bash", os.path.join(os.path.dirname(HERE), "install.sh"),
+             "--open-id", "ou_test", "--lark-cli", fake_lark,
+             "--agents", "codex", "--codex-config", codex],
+            env=env, capture_output=True, text=True, errors="replace")
+        check("安装器: Codex 主路径退出 0", result.returncode == 0)
+
+    # 4) 送信 worker 优雅失败：lark-cli 不可用时应重试→记日志→退出 0，绝不崩
     with tempfile.TemporaryDirectory() as sb:
         cfgp = os.path.join(sb, "config.json")
         logp = os.path.join(sb, "report.log")
@@ -100,7 +118,7 @@ def main():
         logged = os.path.exists(logp) and "give up" in open(logp).read()
         check("worker: 失败已记入日志", logged)
 
-    # 4) codex debounce 聚合：3 个密集 turn 事件 → 只发送 1 次
+    # 5) codex debounce 聚合：3 个密集 turn 事件 → 只发送 1 次
     with tempfile.TemporaryDirectory() as sb:
         cfgp = os.path.join(sb, "config.json")
         logp = os.path.join(sb, "report.log")

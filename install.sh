@@ -101,7 +101,7 @@ if [[ ",$AGENTS," == *",codex,"* ]]; then
   cp "$CODEX_CONFIG" "$CODEX_CONFIG.heige-bak" 2>/dev/null || true
   "$PYTHON_BIN" "$INSTALL_DIR/wire.py" codex --install-dir "$INSTALL_DIR" \
     --codex-config "$CODEX_CONFIG" --app-config "$CONFIG_PATH" >/dev/null
-  WIRED+=("Codex (notify → $CODEX_CONFIG，原有 notify 已链接转发)")
+  WIRED+=("Codex (notify → ${CODEX_CONFIG}，原有 notify 已链接转发)")
 fi
 
 echo
@@ -115,4 +115,4 @@ echo "下一步："
 echo "  1) 新开一个 Claude Code 会话（hook 在会话启动时加载；首次可能需确认 hook 变更）。"
 echo "  2) Codex 需重启会话使 config.toml 生效；notify 在交互式会话结束一轮时触发。"
 echo "  3) 自测发送：$LARK_CLI im +messages-send --as $IDENTITY --user-id $OPEN_ID --markdown '测试'"
-echo "  改阈值/接收人：编辑 $CONFIG_PATH，或重跑 install.sh。卸载：bash uninstall.sh"
+echo "  改阈值/接收人：编辑 ${CONFIG_PATH}，或重跑 install.sh。卸载：bash uninstall.sh"
