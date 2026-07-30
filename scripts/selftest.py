@@ -98,11 +98,82 @@ def main():
         result = subprocess.run(
             ["bash", os.path.join(os.path.dirname(HERE), "install.sh"),
              "--open-id", "ou_test", "--lark-cli", fake_lark,
-             "--agents", "codex", "--codex-config", codex],
+             "--agents", "claude,codex", "--codex-config", codex],
             env=env, capture_output=True, text=True, errors="replace")
-        check("安装器: Codex 主路径退出 0", result.returncode == 0)
+        check("安装器: 双 Agent 主路径退出 0", result.returncode == 0)
 
-    # 4) 送信 worker 优雅失败：lark-cli 不可用时应重试→记日志→退出 0，绝不崩
+    # 4) 安装中途失败时，只回滚本轮触碰的文件
+    with tempfile.TemporaryDirectory() as sb:
+        home = os.path.join(sb, "home")
+        cdir = os.path.join(home, ".claude")
+        codex_dir = os.path.join(home, ".codex")
+        idir = os.path.join(sb, "install")
+        bindir = os.path.join(sb, "bin")
+        for directory in (cdir, codex_dir, idir, bindir):
+            os.makedirs(directory)
+
+        paths = {
+            "claude": os.path.join(cdir, "settings.json"),
+            "codex": os.path.join(codex_dir, "config.toml"),
+            "app": os.path.join(idir, "config.json"),
+            "script": os.path.join(idir, "notify_lib.py"),
+            "sentinel": os.path.join(idir, "keep.txt"),
+        }
+        originals = {
+            "claude": b'{"hooks":{"Stop":[]},"keep":"claude"}\n',
+            "codex": b'model = "keep-codex"\nnotify = ["/old/notify"]\n',
+            "app": b'{"keep":"app"}\n',
+            "script": b'# keep existing script\n',
+            "sentinel": b'leave unrelated file alone\n',
+        }
+        for name, content in originals.items():
+            open(paths[name], "wb").write(content)
+
+        backups = {
+            paths["claude"] + ".heige-bak": b"existing claude backup\n",
+            paths["codex"] + ".heige-bak": b"existing codex backup\n",
+        }
+        for path, content in backups.items():
+            open(path, "wb").write(content)
+
+        fake_lark = os.path.join(bindir, "lark-cli")
+        open(fake_lark, "w").write("#!/usr/bin/env sh\nexit 0\n")
+        os.chmod(fake_lark, 0o755)
+
+        fake_python = os.path.join(bindir, "python3")
+        open(fake_python, "w").write(
+            f"#!{PY}\n"
+            "import os, sys\n"
+            f"real_python = {PY!r}\n"
+            "args = sys.argv[1:]\n"
+            "if len(args) > 1 and args[0].endswith('/wire.py') and args[1] == 'codex':\n"
+            "    config = args[args.index('--codex-config') + 1]\n"
+            "    open(config, 'w').write('corrupted by failing codex wire\\n')\n"
+            "    raise SystemExit(42)\n"
+            "os.execv(real_python, [real_python, *args])\n"
+        )
+        os.chmod(fake_python, 0o755)
+
+        env = dict(os.environ, HOME=home, HEIGE_AGENT_REPORT_HOME=idir,
+                   PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        result = subprocess.run(
+            ["bash", os.path.join(os.path.dirname(HERE), "install.sh"),
+             "--open-id", "ou_test", "--lark-cli", fake_lark,
+             "--agents", "claude,codex", "--claude-config", cdir,
+             "--codex-config", paths["codex"]],
+            env=env, capture_output=True, text=True, errors="replace")
+
+        check("安装器: Codex 接线失败向外传播", result.returncode == 42)
+        for name, content in originals.items():
+            check(f"安装器回滚: 保持 {name} 原字节", open(paths[name], "rb").read() == content)
+        for path, content in backups.items():
+            check(f"安装器回滚: 不覆盖既有备份 {os.path.basename(path)}",
+                  open(path, "rb").read() == content)
+        for filename in ("claude_stop_hook.py", "codex_notify.py", "wire.py", "doctor.py"):
+            check(f"安装器回滚: 删除本轮新增 {filename}",
+                  not os.path.exists(os.path.join(idir, filename)))
+
+    # 5) 送信 worker 优雅失败：lark-cli 不可用时应重试→记日志→退出 0，绝不崩
     with tempfile.TemporaryDirectory() as sb:
         cfgp = os.path.join(sb, "config.json")
         logp = os.path.join(sb, "report.log")
@@ -118,7 +189,7 @@ def main():
         logged = os.path.exists(logp) and "give up" in open(logp).read()
         check("worker: 失败已记入日志", logged)
 
-    # 5) codex debounce 聚合：3 个密集 turn 事件 → 只发送 1 次
+    # 6) codex debounce 聚合：3 个密集 turn 事件 → 只发送 1 次
     with tempfile.TemporaryDirectory() as sb:
         cfgp = os.path.join(sb, "config.json")
         logp = os.path.join(sb, "report.log")

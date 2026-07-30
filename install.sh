@@ -66,6 +66,82 @@ if [[ -z "$OPEN_ID" ]]; then
   exit 1
 fi
 
+# 安装会同时触碰产品目录和两个 Agent 配置。先保存本轮会修改的文件，
+# 任一步失败都逐字节恢复；已存在的长期备份不会被重复安装覆盖。
+TXN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/heige-agent-report.XXXXXX")"
+chmod 700 "$TXN_DIR"
+TXN_PATHS=()
+TXN_STATES=()
+INSTALL_DIR_EXISTED=0
+[[ -d "$INSTALL_DIR" ]] && INSTALL_DIR_EXISTED=1
+
+snapshot_file() {
+  local path="$1"
+  local index="${#TXN_PATHS[@]}"
+  TXN_PATHS[$index]="$path"
+  if [[ -e "$path" || -L "$path" ]]; then
+    if [[ ! -f "$path" ]]; then
+      echo "不能安装：预期文件路径不是普通文件：$path" >&2
+      return 1
+    fi
+    TXN_STATES[$index]="present"
+    cp -p "$path" "$TXN_DIR/$index"
+  else
+    TXN_STATES[$index]="missing"
+  fi
+}
+
+rollback_install() {
+  local status="${1:-1}"
+  local index path
+  trap - ERR HUP INT TERM
+  set +e
+  for ((index=${#TXN_PATHS[@]} - 1; index >= 0; index--)); do
+    path="${TXN_PATHS[$index]}"
+    if [[ "${TXN_STATES[$index]}" == "present" ]]; then
+      mkdir -p "$(dirname "$path")"
+      cp -p "$TXN_DIR/$index" "$path"
+    else
+      rm -f "$path"
+    fi
+  done
+  [[ "$INSTALL_DIR_EXISTED" -eq 0 ]] && rmdir "$INSTALL_DIR" 2>/dev/null || true
+  rm -rf "$TXN_DIR"
+  echo "安装失败，已恢复本轮触碰的文件。" >&2
+  exit "$status"
+}
+
+commit_install() {
+  trap - ERR HUP INT TERM
+  rm -rf "$TXN_DIR"
+}
+
+backup_once() {
+  local source="$1"
+  local backup="$2"
+  if [[ -f "$source" && ! -e "$backup" && ! -L "$backup" ]]; then
+    cp -p "$source" "$backup"
+  fi
+}
+
+trap 'rollback_install "$?"' ERR
+trap 'rollback_install 129' HUP
+trap 'rollback_install 130' INT
+trap 'rollback_install 143' TERM
+
+snapshot_file "$CONFIG_PATH"
+for name in notify_lib.py claude_stop_hook.py codex_notify.py wire.py doctor.py; do
+  snapshot_file "$INSTALL_DIR/$name"
+done
+if [[ ",$AGENTS," == *",claude,"* ]]; then
+  snapshot_file "$CLAUDE_DIR/settings.json"
+  snapshot_file "$CLAUDE_DIR/settings.json.heige-bak"
+fi
+if [[ ",$AGENTS," == *",codex,"* ]]; then
+  snapshot_file "$CODEX_CONFIG"
+  snapshot_file "$CODEX_CONFIG.heige-bak"
+fi
+
 # 3) 拷贝脚本
 mkdir -p "$INSTALL_DIR"
 cp "$REPO_ROOT/scripts/notify_lib.py" "$REPO_ROOT/scripts/claude_stop_hook.py" \
@@ -93,12 +169,12 @@ PY
 # 5) 接线
 WIRED=()
 if [[ ",$AGENTS," == *",claude,"* ]]; then
-  cp "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.heige-bak" 2>/dev/null || true
+  backup_once "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.heige-bak"
   "$PYTHON_BIN" "$INSTALL_DIR/wire.py" claude --install-dir "$INSTALL_DIR" --claude-config "$CLAUDE_DIR" >/dev/null
   WIRED+=("Claude Code (Stop hook → $CLAUDE_DIR/settings.json)")
 fi
 if [[ ",$AGENTS," == *",codex,"* ]]; then
-  cp "$CODEX_CONFIG" "$CODEX_CONFIG.heige-bak" 2>/dev/null || true
+  backup_once "$CODEX_CONFIG" "$CODEX_CONFIG.heige-bak"
   "$PYTHON_BIN" "$INSTALL_DIR/wire.py" codex --install-dir "$INSTALL_DIR" \
     --codex-config "$CODEX_CONFIG" --app-config "$CONFIG_PATH" >/dev/null
   WIRED+=("Codex (notify → ${CODEX_CONFIG}，原有 notify 已链接转发)")
@@ -116,3 +192,5 @@ echo "  1) 新开一个 Claude Code 会话（hook 在会话启动时加载；首
 echo "  2) Codex 需重启会话使 config.toml 生效；notify 在交互式会话结束一轮时触发。"
 echo "  3) 自测发送：$LARK_CLI im +messages-send --as $IDENTITY --user-id $OPEN_ID --markdown '测试'"
 echo "  改阈值/接收人：编辑 ${CONFIG_PATH}，或重跑 install.sh。卸载：bash uninstall.sh"
+
+commit_install
