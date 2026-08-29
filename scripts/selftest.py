@@ -272,7 +272,16 @@ def main():
             codex_notify.notify_lib.log = original_log
 
     # 8) --agents 必须完整校验后才开始安装事务
-    invalid_agent_values = ("", "claud", "claude,claude", "claude,unknown")
+    invalid_agent_values = (
+        "",
+        "claud",
+        "claude,claude",
+        "claude,unknown",
+        "claude,",
+        "claude,codex,",
+        ",claude",
+        "claude,,codex",
+    )
     for value in invalid_agent_values:
         with tempfile.TemporaryDirectory() as sb:
             home = os.path.join(sb, "home")

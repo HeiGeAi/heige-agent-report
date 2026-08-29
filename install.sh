@@ -44,6 +44,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --agents 是安装事务的权限边界，必须在任何写入前完整校验。
+if [[ ! "$AGENTS" =~ ^(claude|codex)(,(claude|codex))*$ ]]; then
+  echo "--agents 格式无效，只支持 claude,codex，且不允许空字段或空白。" >&2
+  exit 2
+fi
 IFS=',' read -r -a REQUESTED_AGENTS <<< "$AGENTS"
 if [[ "${#REQUESTED_AGENTS[@]}" -eq 0 ]]; then
   echo "--agents 不能为空，只支持 claude,codex。" >&2
