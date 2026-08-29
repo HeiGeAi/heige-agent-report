@@ -11,6 +11,7 @@ import sys
 import json
 import tempfile
 import subprocess
+import threading
 import time
 import py_compile
 
@@ -217,6 +218,96 @@ def main():
         logtxt = open(logp).read() if os.path.exists(logp) else ""
         check("codex: 聚合为一次发送", logtxt.count("give up") == 1)
         check("codex: 聚合计数正确", "for 3 turn event(s)" in logtxt)
+
+    # 7) enqueue 写到一半时 flusher 不得抢走半文件并丢失新事件
+    import codex_notify
+    with tempfile.TemporaryDirectory() as sb:
+        pending = os.path.join(sb, ".codex_pending.json")
+        original_pending = codex_notify.PENDING
+        original_dump = codex_notify.json.dump
+        original_load_config = codex_notify.notify_lib.load_config
+        original_quiet_seconds = codex_notify.quiet_seconds
+        original_send_markdown = codex_notify.notify_lib.send_markdown
+        original_log = codex_notify.notify_lib.log
+        dump_started = threading.Event()
+        allow_dump = threading.Event()
+        sent = []
+
+        def delayed_dump(*args, **kwargs):
+            dump_started.set()
+            allow_dump.wait(timeout=3)
+            return original_dump(*args, **kwargs)
+
+        codex_notify.PENDING = pending
+        codex_notify.json.dump = delayed_dump
+        codex_notify.notify_lib.load_config = lambda: {}
+        codex_notify.quiet_seconds = lambda _cfg: 0
+        codex_notify.notify_lib.send_markdown = lambda markdown, _cfg: sent.append(markdown)
+        codex_notify.notify_lib.log = lambda *_args: None
+        try:
+            writer = threading.Thread(
+                target=codex_notify.enqueue,
+                args=({"last-assistant-message": "race-marker"},),
+            )
+            writer.start()
+            check("codex 竞态: writer 到达序列化屏障", dump_started.wait(timeout=2))
+            flusher = threading.Thread(target=codex_notify.flush)
+            flusher.start()
+            time.sleep(0.1)
+            allow_dump.set()
+            writer.join(timeout=3)
+            flusher.join(timeout=3)
+            pending_marker = ""
+            if os.path.exists(pending):
+                pending_marker = open(pending, encoding="utf-8").read()
+            delivered = any("race-marker" in message for message in sent)
+            check("codex 竞态: 新事件仍可交付", delivered or "race-marker" in pending_marker)
+        finally:
+            allow_dump.set()
+            codex_notify.PENDING = original_pending
+            codex_notify.json.dump = original_dump
+            codex_notify.notify_lib.load_config = original_load_config
+            codex_notify.quiet_seconds = original_quiet_seconds
+            codex_notify.notify_lib.send_markdown = original_send_markdown
+            codex_notify.notify_lib.log = original_log
+
+    # 8) --agents 必须完整校验后才开始安装事务
+    invalid_agent_values = ("", "claud", "claude,claude", "claude,unknown")
+    for value in invalid_agent_values:
+        with tempfile.TemporaryDirectory() as sb:
+            home = os.path.join(sb, "home")
+            install_dir = os.path.join(sb, "install")
+            fake_lark = os.path.join(sb, "lark-cli")
+            open(fake_lark, "w").write("#!/usr/bin/env sh\nexit 0\n")
+            os.chmod(fake_lark, 0o755)
+            env = dict(
+                os.environ,
+                HOME=home,
+                HEIGE_AGENT_REPORT_HOME=install_dir,
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    os.path.join(os.path.dirname(HERE), "install.sh"),
+                    "--open-id",
+                    "ou_test",
+                    "--lark-cli",
+                    fake_lark,
+                    "--agents",
+                    value,
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            untouched = (
+                not os.path.exists(install_dir)
+                and not os.path.exists(os.path.join(home, ".claude"))
+                and not os.path.exists(os.path.join(home, ".codex"))
+            )
+            check(f"安装器 agents={value!r}: 非零退出", result.returncode != 0)
+            check(f"安装器 agents={value!r}: 失败前无写入", untouched)
 
     print()
     if FAILS:

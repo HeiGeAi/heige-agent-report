@@ -19,12 +19,28 @@ import os
 import json
 import time
 import subprocess
+import tempfile
+from contextlib import contextmanager
+
+import fcntl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import notify_lib  # noqa: E402
 
 PENDING = os.path.join(notify_lib.HOME_DIR, ".codex_pending.json")
 TURN_DONE_TYPES = ("agent-turn-complete", "turn-ended", "turn-complete")
+
+
+@contextmanager
+def queue_lock():
+    os.makedirs(os.path.dirname(PENDING), exist_ok=True)
+    fd = os.open(PENDING + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def quiet_seconds(cfg):
@@ -52,17 +68,33 @@ def chain(payload, cfg):
 
 def enqueue(data):
     """并入 pending：保留最新 payload、累计轮数，刷新 mtime（即刷新静默窗口）。"""
-    item = {"count": 1, "data": data, "first_ts": time.time()}
-    try:
-        if os.path.exists(PENDING):
-            old = json.load(open(PENDING, encoding="utf-8"))
-            item["count"] = int(old.get("count", 0)) + 1
-            item["first_ts"] = old.get("first_ts", item["first_ts"])
-    except Exception:
-        pass
-    os.makedirs(os.path.dirname(PENDING), exist_ok=True)
-    with open(PENDING, "w", encoding="utf-8") as f:
-        json.dump(item, f, ensure_ascii=False)
+    with queue_lock():
+        item = {"count": 1, "data": data, "first_ts": time.time()}
+        try:
+            if os.path.exists(PENDING):
+                with open(PENDING, encoding="utf-8") as handle:
+                    old = json.load(handle)
+                item["count"] = int(old.get("count", 0)) + 1
+                item["first_ts"] = old.get("first_ts", item["first_ts"])
+        except Exception:
+            pass
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=os.path.dirname(PENDING),
+            prefix=f".{os.path.basename(PENDING)}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+                json.dump(item, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, PENDING)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
 
 
 def spawn_flusher():
@@ -80,17 +112,18 @@ def flush():
     cfg = notify_lib.load_config()
     qs = quiet_seconds(cfg)
     time.sleep(qs)
-    try:
-        mtime = os.path.getmtime(PENDING)
-    except OSError:
-        return  # 已被别的 worker 发走
-    if time.time() - mtime < qs - 1:
-        return  # 窗口内来了新事件，交给更晚的 worker
     sending = PENDING + f".sending.{os.getpid()}"
-    try:
-        os.rename(PENDING, sending)
-    except OSError:
-        return
+    with queue_lock():
+        try:
+            mtime = os.path.getmtime(PENDING)
+        except OSError:
+            return  # 已被别的 worker 发走
+        if time.time() - mtime < qs - 1:
+            return  # 窗口内来了新事件，交给更晚的 worker
+        try:
+            os.replace(PENDING, sending)
+        except OSError:
+            return
     try:
         item = json.load(open(sending, encoding="utf-8"))
     except Exception:

@@ -43,6 +43,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --agents 是安装事务的权限边界，必须在任何写入前完整校验。
+IFS=',' read -r -a REQUESTED_AGENTS <<< "$AGENTS"
+if [[ "${#REQUESTED_AGENTS[@]}" -eq 0 ]]; then
+  echo "--agents 不能为空，只支持 claude,codex。" >&2
+  exit 2
+fi
+SEEN_AGENTS=","
+for agent in "${REQUESTED_AGENTS[@]}"; do
+  if [[ "$agent" != "claude" && "$agent" != "codex" ]]; then
+    echo "--agents 包含无效值: ${agent:-<empty>}（只支持 claude,codex）" >&2
+    exit 2
+  fi
+  if [[ "$SEEN_AGENTS" == *",$agent,"* ]]; then
+    echo "--agents 包含重复值: $agent" >&2
+    exit 2
+  fi
+  SEEN_AGENTS+="$agent,"
+done
+
 PYTHON_BIN="$(command -v python3 || true)"
 [[ -z "$PYTHON_BIN" ]] && { echo "需要 python3，请先安装。" >&2; exit 1; }
 
@@ -181,11 +200,11 @@ if [[ ",$AGENTS," == *",codex,"* ]]; then
 fi
 
 echo
+echo "🩺 跑 doctor 自检 + 发一条测试消息："
+"$PYTHON_BIN" "$INSTALL_DIR/doctor.py" --claude-config "$CLAUDE_DIR" --codex-config "$CODEX_CONFIG"
+echo
 echo "✅ 安装完成。接收人 open_id: $OPEN_ID"
 for w in "${WIRED[@]}"; do echo "  - $w"; done
-echo
-echo "🩺 跑 doctor 自检 + 发一条测试消息："
-"$PYTHON_BIN" "$INSTALL_DIR/doctor.py" --claude-config "$CLAUDE_DIR" --codex-config "$CODEX_CONFIG" || true
 echo
 echo "下一步："
 echo "  1) 新开一个 Claude Code 会话（hook 在会话启动时加载；首次可能需确认 hook 变更）。"
