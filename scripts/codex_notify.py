@@ -76,6 +76,11 @@ def enqueue(data):
             f.truncate()
             json.dump(item, f, ensure_ascii=False)
             f.flush()
+        # pending 含 assistant 消息原文，多用户机器上限本人可读
+        try:
+            os.chmod(PENDING, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
 

@@ -63,6 +63,8 @@ def log(cfg, msg):
                 f.write(tail)
         with open(p, "a", encoding="utf-8") as f:
             f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')}  {msg}\n")
+        # 日志含消息摘要，限本人可读
+        os.chmod(p, 0o600)
     except Exception:
         pass
 
