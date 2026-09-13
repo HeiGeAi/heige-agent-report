@@ -159,7 +159,11 @@ if os.path.exists(path):
     except Exception: cfg = {}
 cfg.update({"open_id": open_id, "identity": identity,
             "min_seconds": int(min_s), "lark_cli": lark})
+# 写全量默认配置，与 README 配置表对齐（已有用户值不覆盖）
 cfg.setdefault("codex_chain", [])
+cfg.setdefault("max_retries", 3)
+cfg.setdefault("quiet_seconds", 120)
+cfg.setdefault("log", True)
 os.makedirs(os.path.dirname(path), exist_ok=True)
 json.dump(cfg, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 open(path, "a").write("\n")

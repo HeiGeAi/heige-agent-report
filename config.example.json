@@ -3,5 +3,8 @@
   "identity": "bot",
   "lark_cli": "lark-cli",
   "min_seconds": 45,
-  "codex_chain": []
+  "codex_chain": [],
+  "max_retries": 3,
+  "quiet_seconds": 120,
+  "log": true
 }
