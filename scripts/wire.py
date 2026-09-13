@@ -17,6 +17,7 @@ import sys
 import os
 import json
 import re
+import shlex
 import argparse
 
 # 优先系统稳定 python（macOS 的 /usr/bin/python3 常驻），退回当前解释器
@@ -37,7 +38,8 @@ def wire_claude(install_dir, claude_dir):
     if os.path.exists(p):
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
-    cmd = f"{PY} {os.path.join(install_dir, 'claude_stop_hook.py')}"
+    # hook 命令由 shell 解析：路径含空格/特殊字符时必须 quote，否则被截断执行失败
+    cmd = f"{shlex.quote(PY)} {shlex.quote(os.path.join(install_dir, 'claude_stop_hook.py'))}"
     hooks = data.setdefault("hooks", {})
     stop = hooks.setdefault("Stop", [])
     # 幂等：去掉任何指向本产品的旧条目，再加一条
