@@ -82,7 +82,70 @@ def unwire_claude(claude_dir):
 
 # ---------- Codex ----------
 
-NOTIFY_RE = re.compile(r'(?m)^\s*notify\s*=\s*(\[.*\])\s*$')
+# 顶层 notify 赋值的键位（值由 _find_notify_span 扫描，容忍注释与多行）
+_NOTIFY_KEY_RE = re.compile(r'(?m)^[ \t]*notify[ \t]*=')
+
+
+def _find_notify_span(text):
+    """定位顶层 notify = [...] 赋值，容忍行尾注释、多行数组、嵌套括号与引号。
+    返回 (start, end, array_src)；没有合法数组写法返回 None。"""
+    m = _NOTIFY_KEY_RE.search(text)
+    if not m:
+        return None
+    n = len(text)
+    i = m.end()
+    while i < n and text[i] in " \t":
+        i += 1
+    if i >= n or text[i] != "[":
+        return None
+    depth = 0
+    j = i
+    while j < n:
+        c = text[j]
+        if c == "#":  # 行内注释：跳到行尾
+            nl = text.find("\n", j)
+            j = n if nl == -1 else nl + 1
+            continue
+        if c in "\"'":
+            q = c
+            j += 1
+            while j < n:
+                if q == '"' and text[j] == "\\":  # 基本字符串转义
+                    j += 2
+                    continue
+                if text[j] == q:
+                    j += 1
+                    break
+                j += 1
+            continue
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return (m.start(), j + 1, text[i:j + 1])
+        j += 1
+    return None  # 数组未闭合
+
+
+def _validate_codex_config(text, expect_notify):
+    """回写前校验：notify 键数量符合预期；有 tomllib（Python 3.11+）时做全量
+    TOML 解析。不合法抛 SystemExit，绝不写出破坏配置的 TOML。"""
+    count = len(_NOTIFY_KEY_RE.findall(text))
+    if count != expect_notify:
+        raise SystemExit(
+            f"回写校验失败：config.toml 应有 {expect_notify} 个 notify 键，实际 {count} 个。"
+            "已中止，config.toml 未改动，请手动检查配置。")
+    try:
+        import tomllib
+    except ImportError:
+        return
+    try:
+        tomllib.loads(text)
+    except Exception as e:
+        raise SystemExit(
+            f"回写校验失败：生成的 config.toml 不是合法 TOML（{e}）。"
+            "已中止，config.toml 未改动。")
 
 
 def wire_codex(install_dir, codex_config, app_config):
@@ -93,11 +156,12 @@ def wire_codex(install_dir, codex_config, app_config):
         with open(p, encoding="utf-8") as f:
             text = f.read()
     our_script = os.path.join(install_dir, "codex_notify.py")
-    our_line = f'notify = ["{PY}", "{our_script}"]'
+    # TOML 基本字符串与 JSON 字符串转义规则一致，用 json.dumps 防路径带空格/引号
+    our_line = "notify = [" + ", ".join(json.dumps(x) for x in (PY, our_script)) + "]"
 
-    m = NOTIFY_RE.search(text)
-    if m:
-        existing = m.group(1)
+    span = _find_notify_span(text)
+    if span:
+        start, end, existing = span
         # 已是我们的？则只更新，不重复捕获
         if "codex_notify.py" not in existing:
             # 捕获原有 notify 作为转发目标，写入 app_config 的 codex_chain
@@ -106,13 +170,19 @@ def wire_codex(install_dir, codex_config, app_config):
                 _set_chain(app_config, chain if isinstance(chain, list) else [])
             except Exception:
                 pass
-        text = NOTIFY_RE.sub(our_line, text, count=1)
+        text = text[:start] + our_line + text[end:]
     else:
+        if _NOTIFY_KEY_RE.search(text):
+            # 有 notify 键但不是合法数组写法：宁可中止也不追加成重复键
+            raise SystemExit(
+                "config.toml 里存在 notify 键但不是合法数组写法，已中止安装，"
+                "config.toml 未改动，请手动检查。")
         # 无 notify：追加（放在文件顶部键区之后，简单追加到末尾也合法）
         if text and not text.endswith("\n"):
             text += "\n"
         text += our_line + "\n"
 
+    _validate_codex_config(text, 1)
     with open(p, "w", encoding="utf-8") as f:
         f.write(text)
     return p
@@ -124,24 +194,26 @@ def unwire_codex(codex_config, app_config=None):
         return None
     with open(p, encoding="utf-8") as f:
         text = f.read()
-    m = NOTIFY_RE.search(text)
-    if m and "codex_notify.py" in m.group(1):
-        # 尝试还原为原有 notify（codex_chain）
-        restored = None
-        if app_config and os.path.exists(os.path.expanduser(app_config)):
-            try:
-                cfg = json.load(open(os.path.expanduser(app_config), encoding="utf-8"))
-                chain = cfg.get("codex_chain") or []
-                if chain:
-                    restored = "notify = " + json.dumps(chain, ensure_ascii=False)
-            except Exception:
-                pass
-        if restored:
-            text = NOTIFY_RE.sub(restored, text, count=1)
-        else:
-            text = NOTIFY_RE.sub("", text, count=1)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(text)
+    span = _find_notify_span(text)
+    if not span or "codex_notify.py" not in span[2]:
+        return p
+    start, end, _existing = span
+    # 尝试还原为原有 notify（codex_chain）
+    restored = None
+    if app_config and os.path.exists(os.path.expanduser(app_config)):
+        try:
+            with open(os.path.expanduser(app_config), encoding="utf-8") as f:
+                cfg = json.load(f)
+            chain = cfg.get("codex_chain") or []
+            if chain:
+                restored = "notify = [" + ", ".join(
+                    json.dumps(str(x), ensure_ascii=False) for x in chain) + "]"
+        except Exception:
+            pass
+    text = text[:start] + (restored or "") + text[end:]
+    _validate_codex_config(text, 1 if restored else 0)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
     return p
 
 
