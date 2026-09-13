@@ -128,6 +128,32 @@ def _find_notify_span(text):
     return None  # 数组未闭合
 
 
+def _parse_notify_array(src):
+    """把 TOML 数组源码解析成 list[str]。依次尝试 JSON、tomllib（3.11+）、
+    Python 字面量（兼容 TOML 单引号写法）；全部失败返回 None。"""
+    try:
+        v = json.loads(src)
+        if isinstance(v, list):
+            return [str(x) for x in v]
+    except Exception:
+        pass
+    try:
+        import tomllib
+        v = tomllib.loads("notify = " + src).get("notify")
+        if isinstance(v, list):
+            return [str(x) for x in v]
+    except Exception:
+        pass
+    try:
+        import ast
+        v = ast.literal_eval(src)
+        if isinstance(v, (list, tuple)):
+            return [str(x) for x in v]
+    except Exception:
+        pass
+    return None
+
+
 def _validate_codex_config(text, expect_notify):
     """回写前校验：notify 键数量符合预期；有 tomllib（Python 3.11+）时做全量
     TOML 解析。不合法抛 SystemExit，绝不写出破坏配置的 TOML。"""
@@ -164,12 +190,15 @@ def wire_codex(install_dir, codex_config, app_config):
         start, end, existing = span
         # 已是我们的？则只更新，不重复捕获
         if "codex_notify.py" not in existing:
-            # 捕获原有 notify 作为转发目标，写入 app_config 的 codex_chain
-            try:
-                chain = json.loads(existing)
-                _set_chain(app_config, chain if isinstance(chain, list) else [])
-            except Exception:
-                pass
+            # 捕获原有 notify 作为转发目标，写入 app_config 的 codex_chain。
+            # 捕获失败与覆盖原值必须互斥：解析不出来就中止，绝不静默覆盖。
+            chain = _parse_notify_array(existing)
+            if chain is None:
+                raise SystemExit(
+                    "无法解析 config.toml 里原有的 notify 数组，为避免覆盖丢失已中止安装，"
+                    "config.toml 未改动。请把 notify 改成 JSON 写法（双引号）后重试，"
+                    "或先手动备份该键。")
+            _set_chain(app_config, chain)
         text = text[:start] + our_line + text[end:]
     else:
         if _NOTIFY_KEY_RE.search(text):
