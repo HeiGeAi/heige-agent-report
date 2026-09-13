@@ -70,8 +70,12 @@ def log(cfg, msg):
 
 
 def _lark_ok(rc, out):
+    """以 exit code 为准，输出匹配只做辅助：仅当出现显式失败标记才算失败。
+    lark-cli 输出格式变化不应误判成功为失败（误判会触发重试，造成重复消息）。"""
+    if rc != 0:
+        return False
     o = (out or "").lower()
-    return rc == 0 and ('"message_id"' in o or '"ok": true' in o or '"ok":true' in o)
+    return '"ok": false' not in o and '"ok":false' not in o
 
 
 def _worker(tmp_path):
