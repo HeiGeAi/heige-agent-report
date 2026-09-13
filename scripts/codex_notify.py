@@ -51,18 +51,33 @@ def chain(payload, cfg):
 
 
 def enqueue(data):
-    """并入 pending：保留最新 payload、累计轮数，刷新 mtime（即刷新静默窗口）。"""
+    """并入 pending：保留最新 payload、累计轮数，刷新 mtime（即刷新静默窗口）。
+    多 notify 进程并发入队时用 flock 串行化读改写，避免聚合计数互相覆盖。"""
     item = {"count": 1, "data": data, "first_ts": time.time()}
+    os.makedirs(os.path.dirname(PENDING), exist_ok=True)
     try:
-        if os.path.exists(PENDING):
-            old = json.load(open(PENDING, encoding="utf-8"))
-            item["count"] = int(old.get("count", 0)) + 1
-            item["first_ts"] = old.get("first_ts", item["first_ts"])
+        import fcntl
+    except ImportError:
+        fcntl = None  # 非 Unix 平台退化为无锁写入（功能可用，计数可能失真）
+    try:
+        with open(PENDING, "a+", encoding="utf-8") as f:
+            if fcntl is not None:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                raw = f.read().strip()
+                if raw:
+                    old = json.loads(raw)
+                    item["count"] = int(old.get("count", 0)) + 1
+                    item["first_ts"] = old.get("first_ts", item["first_ts"])
+            except Exception:
+                pass
+            f.seek(0)
+            f.truncate()
+            json.dump(item, f, ensure_ascii=False)
+            f.flush()
     except Exception:
         pass
-    os.makedirs(os.path.dirname(PENDING), exist_ok=True)
-    with open(PENDING, "w", encoding="utf-8") as f:
-        json.dump(item, f, ensure_ascii=False)
 
 
 def spawn_flusher():
