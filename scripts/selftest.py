@@ -84,6 +84,57 @@ def main():
         check("claude: 卸载后只剩旧 hook", cmds3 == ["echo keep"])
         check("codex: 卸载后还原原 notify", 'notify = ["/old/n", "arg"]' in open(codex).read())
 
+    # 2b) Codex 配置三种真实 TOML 形态 + 不可解析中止（防回归：重复键/静默覆盖）
+    def _toml_valid(text):
+        try:
+            import tomllib
+        except ImportError:
+            return True  # 老 Python 无 tomllib，跳过全量校验
+        try:
+            tomllib.loads(text)
+            return True
+        except Exception:
+            return False
+
+    shapes = [
+        ("行尾注释", 'notify = ["/old/n"] # 电脑操作通知\n', ["/old/n"]),
+        ("单引号", "notify = ['/old/n', 'arg']\n", ["/old/n", "arg"]),
+        ("多行数组", 'notify = [\n  "/old/n",\n  "arg",\n]\n', ["/old/n", "arg"]),
+    ]
+    for label, notify_src, expect_chain in shapes:
+        with tempfile.TemporaryDirectory() as sb:
+            codex = os.path.join(sb, "config.toml")
+            open(codex, "w").write('model = "x"\n' + notify_src)
+            appcfg = os.path.join(sb, "app.json")
+            idir = os.path.join(sb, "install")
+            os.makedirs(idir)
+            wire("codex", "--install-dir", idir, "--codex-config", codex,
+                 "--app-config", appcfg)
+            ct = open(codex).read()
+            check(f"codex {label}: 回写合法且指向本产品",
+                  "codex_notify.py" in ct and _toml_valid(ct))
+            chain = json.load(open(appcfg)).get("codex_chain")
+            check(f"codex {label}: 捕获原 notify", chain == expect_chain)
+            wire("uncodex", "--codex-config", codex, "--app-config", appcfg)
+            restored = open(codex).read()
+            check(f"codex {label}: 卸载还原原 notify",
+                  "codex_notify.py" not in restored
+                  and "/old/n" in restored and _toml_valid(restored))
+
+    # 2c) 不可解析的 notify：必须中止安装且原文件逐字节不动
+    with tempfile.TemporaryDirectory() as sb:
+        codex = os.path.join(sb, "config.toml")
+        original = 'model = "x"\nnotify = [foo bar]\n'
+        open(codex, "w").write(original)
+        appcfg = os.path.join(sb, "app.json")
+        r = subprocess.run([PY, os.path.join(HERE, "wire.py"), "codex",
+                            "--install-dir", sb, "--codex-config", codex,
+                            "--app-config", appcfg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        check("codex 非法 notify: 中止安装（非 0 退出）", r.returncode != 0)
+        check("codex 非法 notify: 原文件逐字节不动", open(codex).read() == original)
+        check("codex 非法 notify: 未写 codex_chain", not os.path.exists(appcfg))
+
     # 3) 完整安装器在隔离 HOME 中能正常返回成功
     with tempfile.TemporaryDirectory() as sb:
         fake_lark = os.path.join(sb, "lark-cli")
@@ -217,6 +268,30 @@ def main():
         logtxt = open(logp).read() if os.path.exists(logp) else ""
         check("codex: 聚合为一次发送", logtxt.count("give up") == 1)
         check("codex: 聚合计数正确", "for 3 turn event(s)" in logtxt)
+
+    # 6b) 并发入队：8 个事件同时到达，flock 保证计数不丢失
+    with tempfile.TemporaryDirectory() as sb:
+        cfgp = os.path.join(sb, "config.json")
+        json.dump({"open_id": "ou_test", "lark_cli": "/bin/false",
+                   "max_retries": 1, "log_path": os.path.join(sb, "report.log"),
+                   "quiet_seconds": 60}, open(cfgp, "w"))
+        env = dict(os.environ, HEIGE_AGENT_REPORT_CONFIG=cfgp,
+                   HEIGE_AGENT_REPORT_HOME=sb,
+                   HEIGE_AGENT_REPORT_QUIET_SECONDS="60")
+        env.pop("LARK_CHANNEL", None)
+        script = os.path.join(HERE, "codex_notify.py")
+        procs = [subprocess.Popen([PY, script, json.dumps(
+            {"type": "agent-turn-complete", "last-assistant-message": f"t{i}"})],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for i in range(8)]
+        for proc in procs:
+            proc.wait()
+        pending = os.path.join(sb, ".codex_pending.json")
+        item = json.load(open(pending))
+        check("codex: 并发入队计数不丢失", item.get("count") == 8)
+        check("codex: pending 限本人可读",
+              (os.stat(pending).st_mode & 0o777) == 0o600)
+        os.unlink(pending)  # 防止 60s 后 flusher 醒来重建已清理的沙箱目录
 
     print()
     if FAILS:
