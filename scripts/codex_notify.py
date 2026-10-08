@@ -19,6 +19,9 @@ import os
 import json
 import time
 import subprocess
+import hashlib
+import fcntl
+from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import notify_lib  # noqa: E402
@@ -50,76 +53,77 @@ def chain(payload, cfg):
         pass
 
 
+def session_key(data):
+    identity = data.get("thread-id") or data.get("thread_id") or data.get("session-id") or data.get("session_id")
+    identity = ["thread", identity] if identity else ["cwd", data.get("cwd")]
+    if identity == ["cwd", None]:
+        return ""
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def pending_path(key):
+    if key and (len(key) != 64 or any(c not in "0123456789abcdef" for c in key)):
+        raise ValueError("invalid session key")
+    return PENDING + ("." + key if key else "")
+
+
+@contextmanager
+def pending_lock(path):
+    # Lock a stable inode, never the pending file that flush removes.
+    fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def enqueue(data):
-    """并入 pending：保留最新 payload、累计轮数，刷新 mtime（即刷新静默窗口）。
-    多 notify 进程并发入队时用 flock 串行化读改写，避免聚合计数互相覆盖。"""
-    item = {"count": 1, "data": data, "first_ts": time.time()}
-    os.makedirs(os.path.dirname(PENDING), exist_ok=True)
-    try:
-        import fcntl
-    except ImportError:
-        fcntl = None  # 非 Unix 平台退化为无锁写入（功能可用，计数可能失真）
-    try:
-        with open(PENDING, "a+", encoding="utf-8") as f:
-            if fcntl is not None:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                raw = f.read().strip()
-                if raw:
-                    old = json.loads(raw)
-                    item["count"] = int(old.get("count", 0)) + 1
-                    item["first_ts"] = old.get("first_ts", item["first_ts"])
-            except Exception:
-                pass
-            f.seek(0)
-            f.truncate()
-            json.dump(item, f, ensure_ascii=False)
-            f.flush()
-        # pending 含 assistant 消息原文，多用户机器上限本人可读
+    key = session_key(data)
+    path = pending_path(key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with pending_lock(path):
+        item = {"count": 1, "data": data, "first_ts": time.time()}
         try:
-            os.chmod(PENDING, 0o600)
-        except OSError:
+            with open(path, encoding="utf-8") as f:
+                old = json.load(f)
+            item["count"] = int(old.get("count", 0)) + 1
+            item["first_ts"] = old.get("first_ts", item["first_ts"])
+        except (OSError, ValueError):
             pass
-    except Exception:
-        pass
+        temporary = path + f".tmp.{os.getpid()}"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(item, f, ensure_ascii=False)
+        os.replace(temporary, path)
+    return key
 
 
-def spawn_flusher():
+def spawn_flusher(key=""):
     try:
         subprocess.Popen(
-            [sys.executable or "python3", os.path.abspath(__file__), "--flush"],
+            [sys.executable or "python3", os.path.abspath(__file__), "--flush", key],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
     except Exception:
         pass
 
 
-def flush():
-    """静默窗口后无新事件才发送；多 worker 并发用原子 rename 抢占，只发一次。"""
+def flush(key=""):
+    """Claim only this session under the same stable lock as enqueue."""
     cfg = notify_lib.load_config()
     qs = quiet_seconds(cfg)
     time.sleep(qs)
-    try:
-        mtime = os.path.getmtime(PENDING)
-    except OSError:
-        return  # 已被别的 worker 发走
-    if time.time() - mtime < qs - 1:
-        return  # 窗口内来了新事件，交给更晚的 worker
-    sending = PENDING + f".sending.{os.getpid()}"
-    try:
-        os.rename(PENDING, sending)
-    except OSError:
+    path = pending_path(key)
+    if not os.path.exists(path):
         return
-    try:
-        item = json.load(open(sending, encoding="utf-8"))
-    except Exception:
-        item = {}
-    finally:
+    with pending_lock(path):
         try:
-            os.unlink(sending)
+            if time.time() - os.path.getmtime(path) < qs:
+                return
+            with open(path, encoding="utf-8") as f:
+                item = json.load(f)
+            os.unlink(path)
         except OSError:
-            pass
+            return
 
     data = item.get("data") or {}
     count = int(item.get("count", 1))
@@ -138,7 +142,7 @@ def flush():
 
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--flush":
-        flush()
+        flush(sys.argv[2] if len(sys.argv) > 2 else "")
         return
     payload = sys.argv[-1] if len(sys.argv) > 1 else "{}"
     # 与 lark-coding-agent-bridge 共存：bridge 驱动的会话由 bridge 自己回卡片，整体跳过
@@ -157,8 +161,8 @@ def main():
         return
     if data.get("type", "") not in TURN_DONE_TYPES:
         return
-    enqueue(data)
-    spawn_flusher()
+    key = enqueue(data)
+    spawn_flusher(key)
 
 
 if __name__ == "__main__":
