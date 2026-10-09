@@ -66,15 +66,19 @@ def main():
                 ts = parse_ts(o.get("timestamp"))
                 if ts:
                     last_ts = ts
-                if t == "user" and not o.get("isSidechain") and "toolUseResult" not in o:
+                if (t == "user" and not o.get("isSidechain") and not o.get("isMeta")
+                        and "toolUseResult" not in o):
                     content = (o.get("message", {}) or {}).get("content")
                     is_prompt = isinstance(content, str) or (
                         isinstance(content, list)
-                        and any(isinstance(c, dict) and c.get("type") == "text" for c in content)
+                        and any(isinstance(c, dict) and c.get("type") in ("text", "image", "document") for c in content)
                         and not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
                     )
-                    if is_prompt and ts:
+                    if is_prompt:
+                        # A real new turn owns both its summary and its clock.
+                        # Missing timestamps must not borrow the prior turn.
                         last_user_ts = ts
+                        last_assistant = ""
                 elif t == "assistant" and not o.get("isSidechain"):
                     parts = [c.get("text", "") for c in ((o.get("message", {}) or {}).get("content") or [])
                              if isinstance(c, dict) and c.get("type") == "text"]

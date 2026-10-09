@@ -108,7 +108,7 @@ def spawn_flusher(key=""):
 
 
 def flush(key=""):
-    """Claim only this session under the same stable lock as enqueue."""
+    """Acknowledge this session only after the dispatch worker has started."""
     cfg = notify_lib.load_config()
     qs = quiet_seconds(cfg)
     time.sleep(qs)
@@ -121,23 +121,32 @@ def flush(key=""):
                 return
             with open(path, encoding="utf-8") as f:
                 item = json.load(f)
-            os.unlink(path)
         except OSError:
             return
 
-    data = item.get("data") or {}
-    count = int(item.get("count", 1))
-    summary = (data.get("last-assistant-message")
-               or data.get("last_assistant_message") or "").strip()
-    if not summary:
-        ims = data.get("input-messages") or data.get("input_messages") or []
-        summary = ("；".join(str(x) for x in ims)[:200]) if ims else "（Codex 任务完成，无文本输出）"
+        data = item.get("data") or {}
+        count = int(item.get("count", 1))
+        summary = (data.get("last-assistant-message")
+                   or data.get("last_assistant_message") or "").strip()
+        if not summary:
+            ims = data.get("input-messages") or data.get("input_messages") or []
+            summary = ("；".join(str(x) for x in ims)[:200]) if ims else "（Codex 任务完成，无文本输出）"
 
-    proj = notify_lib.project_name(data.get("cwd") or None)
-    agg = f"（聚合了 {count} 轮中间汇报）" if count > 1 else ""
-    md = f"⌨️ **Codex · 任务完成**{agg}\n项目：{proj}\n\n{notify_lib.clip(summary)}"
-    notify_lib.send_markdown(md, cfg)
-    notify_lib.log(cfg, f"codex flush: sent 1 notice for {count} turn event(s)")
+        proj = notify_lib.project_name(data.get("cwd") or None)
+        agg = f"（聚合了 {count} 轮中间汇报）" if count > 1 else ""
+        md = f"⌨️ **Codex · 任务完成**{agg}\n项目：{proj}\n\n{notify_lib.clip(summary)}"
+        # send_markdown only starts a background worker; its network retries do
+        # not hold this lock. Keep the pending record until startup succeeds so
+        # a failed start needs no lossy requeue/merge with a newer event.
+        try:
+            accepted = notify_lib.send_markdown(md, cfg)
+        except Exception:
+            accepted = False
+        if not accepted:
+            notify_lib.log(cfg, f"codex flush: dispatch not accepted; retained {count} turn event(s) for retry")
+            return
+        os.unlink(path)
+        notify_lib.log(cfg, f"codex flush: dispatch accepted for {count} turn event(s)")
 
 
 def main():
