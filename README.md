@@ -137,6 +137,8 @@ python3 ~/.heige-agent-report/doctor.py
 tail ~/.heige-agent-report/report.log
 ```
 
+Codex 日志里的 `dispatch accepted` 只表示后台 worker 已启动，不表示送达；实际发送结果看 `sent ok` 或 `give up after retries`。如果缺少接收人、临时文件创建失败或 worker 启动失败，待发记录会保留，日志显示 `dispatch not accepted; retained ... for retry`。修好配置或启动问题后，下一条同会话事件触发的 flusher 会再次尝试；也可手动运行 `python3 ~/.heige-agent-report/codex_notify.py --flush <session-key>`（`<session-key>` 是 `.codex_pending.json.<session-key>` 文件名后的 64 位摘要；无后缀的旧记录省略该参数）。启动失败不会额外创建定时重试；已启动 worker 的网络退避重试保持不变。
+
 ## 卸载 Uninstall
 
 ```bash
