@@ -43,6 +43,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ ! "$AGENTS" =~ ^(claude|codex)(,(claude|codex))*$ ]]; then
+  echo "--agents 格式无效，只支持 claude,codex，且不允许空字段或空白。" >&2
+  exit 2
+fi
+
 PYTHON_BIN="$(command -v python3 || true)"
 [[ -z "$PYTHON_BIN" ]] && { echo "需要 python3，请先安装。" >&2; exit 1; }
 
