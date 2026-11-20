@@ -153,6 +153,19 @@ def main():
             env=env, capture_output=True, text=True, errors="replace")
         check("安装器: 双 Agent 主路径退出 0", result.returncode == 0)
 
+    # 非法安装目标应在任何写入前拒绝
+    with tempfile.TemporaryDirectory() as sb:
+        env = dict(os.environ, HEIGE_AGENT_REPORT_HOME=os.path.join(sb, "install"))
+        for agents in ("", "claude,,codex", "codex,", "unknown"):
+            result = subprocess.run(
+                ["bash", os.path.join(os.path.dirname(HERE), "install.sh"),
+                 "--open-id", "ou_test", "--lark-cli", "true", "--agents", agents,
+                 "--claude-config", os.path.join(sb, "claude"),
+                 "--codex-config", os.path.join(sb, "codex", "config.toml")],
+                env=env, capture_output=True, text=True)
+            check(f"安装器: 拒绝无效目标 {agents!r} 且不写文件",
+                  result.returncode == 2 and "--agents" in result.stderr and not os.listdir(sb))
+
     # 4) 安装中途失败时，只回滚本轮触碰的文件
     with tempfile.TemporaryDirectory() as sb:
         home = os.path.join(sb, "home")
