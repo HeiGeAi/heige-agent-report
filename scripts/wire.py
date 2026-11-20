@@ -31,6 +31,20 @@ def claude_settings_path(claude_dir):
     return os.path.join(os.path.expanduser(claude_dir), "settings.json")
 
 
+def _without_our_hooks(groups):
+    kept = []
+    for group in groups:
+        hooks = group.get("hooks", [])
+        remaining = [h for h in hooks if not (
+            MARK in (h.get("command") or "")
+            or "claude_stop_hook.py" in (h.get("command") or ""))]
+        if len(remaining) == len(hooks):
+            kept.append(group)
+        elif remaining:
+            kept.append({**group, "hooks": remaining})
+    return kept
+
+
 def wire_claude(install_dir, claude_dir):
     p = claude_settings_path(claude_dir)
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -43,12 +57,7 @@ def wire_claude(install_dir, claude_dir):
     hooks = data.setdefault("hooks", {})
     stop = hooks.setdefault("Stop", [])
     # 幂等：去掉任何指向本产品的旧条目，再加一条
-    def is_ours(group):
-        for h in group.get("hooks", []):
-            if MARK in (h.get("command") or "") or "claude_stop_hook.py" in (h.get("command") or ""):
-                return True
-        return False
-    stop = [g for g in stop if not is_ours(g)]
+    stop = _without_our_hooks(stop)
     stop.append({"hooks": [{"type": "command", "command": cmd}]})
     hooks["Stop"] = stop
     with open(p, "w", encoding="utf-8") as f:
@@ -64,12 +73,7 @@ def unwire_claude(claude_dir):
     with open(p, encoding="utf-8") as f:
         data = json.load(f)
     stop = (data.get("hooks", {}) or {}).get("Stop", [])
-    def is_ours(group):
-        for h in group.get("hooks", []):
-            if "claude_stop_hook.py" in (h.get("command") or ""):
-                return True
-        return False
-    kept = [g for g in stop if not is_ours(g)]
+    kept = _without_our_hooks(stop)
     if kept:
         data["hooks"]["Stop"] = kept
     else:
@@ -85,13 +89,62 @@ def unwire_claude(claude_dir):
 # ---------- Codex ----------
 
 # 顶层 notify 赋值的键位（值由 _find_notify_span 扫描，容忍注释与多行）
-_NOTIFY_KEY_RE = re.compile(r'(?m)^[ \t]*notify[ \t]*=')
+_NOTIFY_KEY_RE = re.compile(r"(?m)^[ \t]*(?:notify|\"notify\"|'notify')[ \t]*=")
+
+
+def _root_end(text, collect=False):
+    """Find the first real table header, ignoring strings, comments and arrays."""
+    i, depth, line_start = 0, 0, True
+    keys = []
+    while i < len(text):
+        c = text[i]
+        if c == "\n":
+            line_start = True
+            i += 1
+            continue
+        if line_start and depth == 0:
+            match = _NOTIFY_KEY_RE.match(text, i)
+            if match:
+                keys.append(match)
+        if c in " \t\r":
+            i += 1
+            continue
+        if c == "#":
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        if line_start and depth == 0 and c == "[":
+            return keys if collect else i
+        line_start = False
+        if c in "\"'":
+            quote = c * 3 if text.startswith(c * 3, i) else c
+            i += len(quote)
+            while i < len(text):
+                if c == '"' and text[i] == "\\":
+                    i += 2
+                elif text.startswith(quote, i):
+                    i += len(quote)
+                    break
+                else:
+                    i += 1
+            continue
+        if c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+        i += 1
+    return keys if collect else len(text)
+
+
+def _root_notify_key(text):
+    keys = _root_end(text, collect=True)
+    return keys[0] if keys else None
 
 
 def _find_notify_span(text):
     """定位顶层 notify = [...] 赋值，容忍行尾注释、多行数组、嵌套括号与引号。
     返回 (start, end, array_src)；没有合法数组写法返回 None。"""
-    m = _NOTIFY_KEY_RE.search(text)
+    m = _root_notify_key(text)
     if not m:
         return None
     n = len(text)
@@ -159,7 +212,7 @@ def _parse_notify_array(src):
 def _validate_codex_config(text, expect_notify):
     """回写前校验：notify 键数量符合预期；有 tomllib（Python 3.11+）时做全量
     TOML 解析。不合法抛 SystemExit，绝不写出破坏配置的 TOML。"""
-    count = len(_NOTIFY_KEY_RE.findall(text))
+    count = len(_root_end(text, collect=True))
     if count != expect_notify:
         raise SystemExit(
             f"回写校验失败：config.toml 应有 {expect_notify} 个 notify 键，实际 {count} 个。"
@@ -169,7 +222,9 @@ def _validate_codex_config(text, expect_notify):
     except ImportError:
         return
     try:
-        tomllib.loads(text)
+        parsed = tomllib.loads(text)
+        if ("notify" in parsed) != bool(expect_notify):
+            raise ValueError("top-level notify missing or unexpected")
     except Exception as e:
         raise SystemExit(
             f"回写校验失败：生成的 config.toml 不是合法 TOML（{e}）。"
@@ -203,15 +258,13 @@ def wire_codex(install_dir, codex_config, app_config):
             _set_chain(app_config, chain)
         text = text[:start] + our_line + text[end:]
     else:
-        if _NOTIFY_KEY_RE.search(text):
+        if _root_notify_key(text):
             # 有 notify 键但不是合法数组写法：宁可中止也不追加成重复键
             raise SystemExit(
                 "config.toml 里存在 notify 键但不是合法数组写法，已中止安装，"
                 "config.toml 未改动，请手动检查。")
-        # 无 notify：追加（放在文件顶部键区之后，简单追加到末尾也合法）
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += our_line + "\n"
+        # Root keys must precede all table declarations.
+        text = our_line + "\n" + text
 
     _validate_codex_config(text, 1)
     with open(p, "w", encoding="utf-8") as f:
